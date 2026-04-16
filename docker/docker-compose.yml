@@ -1,0 +1,148 @@
+version: "3.8"
+
+networks:
+  finlake-net:
+    driver: bridge
+
+volumes:
+  minio-data:
+  airflow-db:
+  kafka-data:
+
+services:
+
+  # ─────────────────────────────────────────────
+  # ZOOKEEPER — Kafka's coordination service
+  # ─────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    container_name: finlake-zookeeper
+    networks: [finlake-net]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # KAFKA — Message broker for streaming ticks
+  # ─────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: finlake-kafka
+    networks: [finlake-net]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"   # accessible from your local Python scripts
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # MINIO — Local S3-compatible object storage
+  # Stores all Bronze / Silver / Gold data files
+  # ─────────────────────────────────────────────
+  minio:
+    image: minio/minio:RELEASE.2024-06-04T19-20-08Z
+    container_name: finlake-minio
+    networks: [finlake-net]
+    ports:
+      - "9000:9000"   # S3 API endpoint
+      - "9001:9001"   # MinIO web console (browser UI)
+    volumes:
+      - minio-data:/data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # MINIO INIT — Creates the 'finlake' bucket on startup
+  # ─────────────────────────────────────────────
+  minio-init:
+    image: minio/mc:latest
+    container_name: finlake-minio-init
+    networks: [finlake-net]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb --ignore-existing local/finlake &&
+      mc mb --ignore-existing local/finlake-warehouse &&
+      echo 'Buckets created: finlake, finlake-warehouse'
+      "
+
+  # ─────────────────────────────────────────────
+  # APACHE SPARK — Distributed processing engine
+  # Runs all Bronze→Silver and Silver→Gold jobs
+  # ─────────────────────────────────────────────
+  spark:
+    image: bitnami/spark:3.5.1
+    container_name: finlake-spark
+    networks: [finlake-net]
+    ports:
+      - "4040:4040"   # Spark Web UI (monitor job progress)
+      - "8888:8888"   # For notebook access if needed
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+    volumes:
+      - ./src:/opt/bitnami/spark/src
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4040"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+
+  # ─────────────────────────────────────────────
+  # APACHE AIRFLOW — Pipeline orchestration
+  # Schedules and monitors all pipeline stages
+  # ─────────────────────────────────────────────
+  airflow:
+    image: apache/airflow:2.9.3
+    container_name: finlake-airflow
+    networks: [finlake-net]
+    depends_on:
+      - minio
+    ports:
+      - "8080:8080"   # Airflow web UI
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - airflow-db:/opt/airflow
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+      AIRFLOW__WEBSERVER__SECRET_KEY: finlake-secret-key-2024
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    command: standalone
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
