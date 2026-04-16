@@ -1,0 +1,56 @@
+{
+  "type": "record",
+  "name": "MarketTick",
+  "namespace": "com.finlake.streaming",
+  "doc": "A single market tick event representing a real-time price update for a traded symbol.",
+  "fields": [
+    {
+      "name": "symbol",
+      "type": "string",
+      "doc": "Stock ticker symbol, e.g. AAPL"
+    },
+    {
+      "name": "event_timestamp",
+      "type": {
+        "type": "long",
+        "logicalType": "timestamp-millis"
+      },
+      "doc": "UTC timestamp of the tick event in milliseconds since epoch"
+    },
+    {
+      "name": "price",
+      "type": "double",
+      "doc": "Last traded price"
+    },
+    {
+      "name": "bid",
+      "type": "double",
+      "doc": "Current best bid price"
+    },
+    {
+      "name": "ask",
+      "type": "double",
+      "doc": "Current best ask price"
+    },
+    {
+      "name": "volume",
+      "type": "long",
+      "doc": "Number of shares traded in this tick"
+    },
+    {
+      "name": "exchange",
+      "type": "string",
+      "doc": "Exchange where the tick originated, e.g. NASDAQ"
+    },
+    {
+      "name": "trade_condition",
+      "type": {
+        "type": "enum",
+        "name": "TradeCondition",
+        "symbols": ["REGULAR", "EXTENDED_HOURS", "AFTER_HOURS", "PRE_MARKET"]
+      },
+      "default": "REGULAR",
+      "doc": "Market session condition for this tick"
+    }
+  ]
+}
